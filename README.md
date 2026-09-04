@@ -168,9 +168,18 @@ python3 src/clump.py
 Keep the transmitter kill switch in hand for every powered run.
 
 By default the drone climbs to 3 m, scans until it finds another drone, closes
-to a 2 m range and holds there for `CLUMP_HOLD_S`, then lands. The whole run is
-capped at `MISSION_TIMEOUT_S`, 150 s, whether or not the schedule ever
+to `CLUMP_RANGE_M` and holds there for `CLUMP_HOLD_S`, then lands. The whole
+run is capped at `MISSION_TIMEOUT_S`, 150 s, whether or not the schedule ever
 completes.
+
+Both entry points run a preflight geometry check first and log anything that
+does not add up, so a target range the hardware cannot reach shows up on the
+ground rather than as a drone that hovers and never closes:
+
+```
+    0.02 [preflight] WARNING 0.50 m target needs a 680 px span in a 320 px frame, which cannot be measured. The closest measurable range at 24.3 deg is 1.33 m; 0.50 m needs a lens of at least 59 deg
+    0.02 [preflight] WARNING 0.50 m leaves 4 cm of air between two 0.46 m cages
+```
 
 The schedule clock starts on the first detection, not at takeoff. Searching is
 untimed, so a drone that takes a minute to find its partner still gets its
@@ -332,9 +341,26 @@ carries across unchanged.
 **Range.** Range comes from the pixel span of the corner cluster:
 `range = focal_px * CAGE_WIDTH_M / span_px`. `HORIZONTAL_FOV_DEG` has to match
 the lens actually fitted, or every range will be wrong by a constant factor.
-At the default 24.3 degrees and 320x240, a 2 m range is a 170 px span and the
-collision floor is a 283 px span, which nearly fills the frame. Confirm the
-FOV against a tape measure with `vision_test.py` before trusting any range.
+Confirm it against a tape measure with `vision_test.py` before trusting any
+range.
+
+The lens sets how close the drones can formate. A cage cannot be measured once
+it overflows the frame, so the closest measurable range is
+`range_constant / (USABLE_FRAME_FRACTION * frame width)`. At 24.3 degrees and
+320 px that is 1.33 m, and the span at each range is:
+
+| range | span | of a 320 px frame |
+|---|---|---|
+| 2.00 m | 170 px | 53 percent |
+| 1.33 m | 256 px | 80 percent, the practical limit |
+| 1.00 m | 340 px | overflows |
+| 0.50 m | 680 px | overflows by more than 2x |
+
+Below the limit the corners clip on the frame edge, the span stops growing,
+and the range estimate saturates and then reads backwards as corners leave the
+frame. Widening the lens is the only fix: 0.5 m needs about 60 degrees. That
+trades against acquisition, since a wider lens puts fewer pixels on a distant
+cage, so the drone will not see its partner from as far away.
 
 **Control.** `YAW_GAINS` and `RANGE_GAINS` are `(kp, ki, kd)`. Raise
 `DETECTION_HOLD_S` to coast further through dropped frames, lower it to fall
@@ -386,11 +412,14 @@ Those durations are measured from the first detection, so lengthening the
 search does not eat into the clump phase. It currently holds one phase, the
 clump. Appending `(20.0, 4.0)` would make the drone separate to 4 m for 20 s
 afterwards, with no code change.
+
 `MINIMUM_RANGE_M` is derived, not set directly: it is two cage radii plus
-`SAFETY_GAP_M`, which is 1.21 m at the defaults. `CLUMP_RANGE_M` must stay
-comfortably above it or the drone will sit on the braking limit instead of
-reaching its standoff. `BRAKING_DECEL_M_S2` and `CONTROL_LAG_S` set how early
-that limit starts to bite.
+`SAFETY_GAP_M`. The approach speed is capped by how much room is left before
+that floor, so a target range at or inside the floor means the drone stops
+short and hovers there for the whole phase. `CLUMP_RANGE_M` must stay above
+it. `BRAKING_DECEL_M_S2` and `CONTROL_LAG_S` set how early the cap bites; at a
+0.5 m target with a 0.49 m floor the last stretch is flown at about 3 cm/s.
+
 
 ## Performance
 

@@ -7,6 +7,7 @@ import cv2
 
 import annotate
 import config
+import mission
 from detection import (CORNER_FIELDS, Detection, FrameGeometry,
                        VISION_FIELDS, corner_rows, vision_row)
 from flight_log import FlightLog
@@ -268,6 +269,8 @@ def main():
                        f"{config.MARKER_HUE_WRAP_HIGH} "
                        f"saturation min {config.MARKER_SATURATION_MIN} "
                        f"value min {config.MARKER_VALUE_MIN}")
+    for warning in mission.preflight_warnings(FrameGeometry()):
+        log.event("preflight", f"WARNING {warning}")
     try:
         if arguments.source:
             run_file(log, arguments.source, arguments.snapshot_every)

@@ -48,3 +48,40 @@ def search_yaw_rate(detection, now):
     turning = float(now % period < turn_s)
     return math.copysign(config.SEARCH_YAW_RATE_DPS * turning,
                          detection.bearing_deg or 1.0)
+
+
+def closest_measurable_range(geometry):
+    return geometry.range_constant / (config.USABLE_FRAME_FRACTION *
+                                      geometry.width)
+
+
+def required_fov_deg(range_m, geometry):
+    focal_px = (config.USABLE_FRAME_FRACTION * geometry.width * range_m /
+                config.CAGE_WIDTH_M)
+    return math.degrees(2.0 * math.atan((geometry.width / 2.0) / focal_px))
+
+
+def preflight_warnings(geometry):
+    lines = []
+    closest = closest_measurable_range(geometry)
+    for _, target_range_m in config.MISSION_PHASES:
+        gap_m = target_range_m - 2.0 * config.CAGE_RADIUS_M
+        if target_range_m <= config.MINIMUM_RANGE_M:
+            lines.append(
+                f"{target_range_m:.2f} m target is inside the "
+                f"{config.MINIMUM_RANGE_M:.2f} m collision floor, so the "
+                f"braking cap will stop the drone short of it forever")
+        if target_range_m < closest:
+            lines.append(
+                f"{target_range_m:.2f} m target needs a "
+                f"{geometry.range_constant / target_range_m:.0f} px span in a "
+                f"{geometry.width} px frame, which cannot be measured. The "
+                f"closest measurable range at "
+                f"{config.HORIZONTAL_FOV_DEG:.1f} deg is {closest:.2f} m; "
+                f"{target_range_m:.2f} m needs a lens of at least "
+                f"{required_fov_deg(target_range_m, geometry):.0f} deg")
+        if gap_m < config.CAGE_RADIUS_M:
+            lines.append(
+                f"{target_range_m:.2f} m leaves {gap_m * 100:.0f} cm of air "
+                f"between two {2 * config.CAGE_RADIUS_M:.2f} m cages")
+    return lines

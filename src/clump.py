@@ -97,10 +97,12 @@ def fly(log, camera, drone):
     rows = log.csv("behaviour", BEHAVIOUR_FIELDS)
     interval = 1.0 / config.CONTROL_RATE_HZ
 
-    log.event("mission", f"close to {config.CLUMP_RANGE_M:.1f} m and hold "
+    log.event("mission", f"close to {config.CLUMP_RANGE_M:.2f} m and hold "
                          f"for {controller.schedule.duration:.0f} s after "
                          f"acquisition, collision floor "
                          f"{config.MINIMUM_RANGE_M:.2f} m")
+    for warning in mission.preflight_warnings(camera.geometry):
+        log.event("preflight", f"WARNING {warning}")
 
     started = time.monotonic()
     next_tick = started
