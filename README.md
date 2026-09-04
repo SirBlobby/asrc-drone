@@ -177,9 +177,16 @@ does not add up, so a target range the hardware cannot reach shows up on the
 ground rather than as a drone that hovers and never closes:
 
 ```
-    0.02 [preflight] WARNING 0.50 m target needs a 680 px span in a 320 px frame, which cannot be measured. The closest measurable range at 24.3 deg is 1.33 m; 0.50 m needs a lens of at least 59 deg
-    0.02 [preflight] WARNING 0.50 m leaves 4 cm of air between two 0.46 m cages
+    0.02 [preflight] WARNING 0.20 m target is inside the 0.49 m collision floor, so the braking cap will stop the drone short of it forever
+    0.02 [preflight] WARNING 0.20 m target needs a 1699 px span in a 320 px frame, which cannot be measured. The closest measurable range at 24.3 deg is 1.33 m; 0.20 m needs a lens of at least 110 deg
+    0.02 [preflight] WARNING 0.20 m is closer than two 0.46 m cages can physically be. They touch at 0.46 m centre to centre, so this asks them to overlap by 26 cm. Ranges are centre to centre, not the air gap between the cages
 ```
+
+`CLUMP_RANGE_M` is set to 0.20 m deliberately, as a request to close as far as
+the hardware allows. Ranges are centre to centre, and two 0.46 m cages touch
+at 0.4572 m, so 0.20 m is not reachable. The collision floor at 0.4872 m is
+what actually stops the drone, holding the cages about 3 cm apart. The three
+warnings above are expected on every run at this setting.
 
 The schedule clock starts on the first detection, not at takeoff. Searching is
 untimed, so a drone that takes a minute to find its partner still gets its
@@ -354,13 +361,22 @@ it overflows the frame, so the closest measurable range is
 | 2.00 m | 170 px | 53 percent |
 | 1.33 m | 256 px | 80 percent, the practical limit |
 | 1.00 m | 340 px | overflows |
-| 0.50 m | 680 px | overflows by more than 2x |
+| 0.49 m | 697 px | overflows, the collision floor |
+| 0.20 m | 1699 px | overflows by more than 5x |
 
 Below the limit the corners clip on the frame edge, the span stops growing,
 and the range estimate saturates and then reads backwards as corners leave the
-frame. Widening the lens is the only fix: 0.5 m needs about 60 degrees. That
-trades against acquisition, since a wider lens puts fewer pixels on a distant
-cage, so the drone will not see its partner from as far away.
+frame. Widening the lens is the only fix. A 47 degree lens reaches 0.66 m, and
+60 degrees reaches the 0.49 m cage contact floor. That trades against
+acquisition, since a wider lens puts fewer pixels on a distant cage, so the
+drone will not see its partner from as far away.
+
+**This limit also caps the collision floor.** The braking cap is computed from
+the measured range, and below 1.33 m that measurement saturates. The drone can
+be at 0.8 m while the camera still reports 1.33 m, and the cap will happily
+allow 0.66 m/s into a cage it cannot see closing. Until the lens is wide
+enough to measure the whole approach, the floor is advisory and the kill
+switch is the real protection.
 
 **Control.** `YAW_GAINS` and `RANGE_GAINS` are `(kp, ki, kd)`. Raise
 `DETECTION_HOLD_S` to coast further through dropped frames, lower it to fall
@@ -414,11 +430,11 @@ clump. Appending `(20.0, 4.0)` would make the drone separate to 4 m for 20 s
 afterwards, with no code change.
 
 `MINIMUM_RANGE_M` is derived, not set directly: it is two cage radii plus
-`SAFETY_GAP_M`. The approach speed is capped by how much room is left before
-that floor, so a target range at or inside the floor means the drone stops
-short and hovers there for the whole phase. `CLUMP_RANGE_M` must stay above
-it. `BRAKING_DECEL_M_S2` and `CONTROL_LAG_S` set how early the cap bites; at a
-0.5 m target with a 0.49 m floor the last stretch is flown at about 3 cm/s.
+`SAFETY_GAP_M`, currently 0.4572 plus 0.03 for a 0.4872 m floor. The approach
+speed is capped by how much room is left before that floor, so a target range
+at or inside the floor means the drone closes to the floor and holds there for
+the rest of the phase, which is the intent at the current 0.20 m setting.
+`BRAKING_DECEL_M_S2` and `CONTROL_LAG_S` set how early the cap bites.
 
 
 ## Performance

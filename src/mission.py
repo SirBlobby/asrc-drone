@@ -80,7 +80,15 @@ def preflight_warnings(geometry):
                 f"{config.HORIZONTAL_FOV_DEG:.1f} deg is {closest:.2f} m; "
                 f"{target_range_m:.2f} m needs a lens of at least "
                 f"{required_fov_deg(target_range_m, geometry):.0f} deg")
-        if gap_m < config.CAGE_RADIUS_M:
+        if gap_m < 0.0:
+            lines.append(
+                f"{target_range_m:.2f} m is closer than two "
+                f"{2 * config.CAGE_RADIUS_M:.2f} m cages can physically be. "
+                f"They touch at {2 * config.CAGE_RADIUS_M:.2f} m centre to "
+                f"centre, so this asks them to overlap by "
+                f"{-gap_m * 100:.0f} cm. Ranges are centre to centre, not "
+                f"the air gap between the cages")
+        elif gap_m < config.CAGE_RADIUS_M:
             lines.append(
                 f"{target_range_m:.2f} m leaves {gap_m * 100:.0f} cm of air "
                 f"between two {2 * config.CAGE_RADIUS_M:.2f} m cages")
