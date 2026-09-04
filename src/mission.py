@@ -22,12 +22,32 @@ class RangeSchedule:
         return elapsed >= self.duration
 
 
-def visibility(detection, now):
-    freshness = clamp_unit(1.0 - detection.age(now) / config.DETECTION_HOLD_S)
+def freshness(detection, now, window_s):
+    return clamp_unit(1.0 - detection.age(now) / window_s)
+
+
+def strength(detection):
     span = max(1, config.TRUSTED_CORNER_COUNT - config.MIN_CLUSTER_CORNERS + 1)
-    strength = clamp_unit(
+    return clamp_unit(
         (detection.corner_count - config.MIN_CLUSTER_CORNERS + 1) / span)
-    return freshness * strength
+
+
+def aim(detection):
+    return clamp_unit(1.0 - abs(detection.bearing_deg) /
+                      config.APPROACH_CENTRE_TOL_DEG)
+
+
+def tracking_weight(detection, now):
+    return freshness(detection, now, config.DETECTION_HOLD_S)
+
+
+def approach_weight(detection, now):
+    return (tracking_weight(detection, now) * strength(detection) *
+            aim(detection))
+
+
+def search_weight(detection, now):
+    return 1.0 - freshness(detection, now, config.REACQUIRE_HOLD_S)
 
 
 def approach_speed_limit(range_m):

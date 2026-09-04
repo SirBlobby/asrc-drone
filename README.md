@@ -17,16 +17,33 @@ output is blended against a search command by a single continuous weight.
   cluster centroid.
 - **Range PID** drives forward speed from the error between the measured
   range and the range the mission schedule currently asks for.
-- **Visibility** is a number between 0 and 1 built from how old the last
-  detection is and how many corners it held. At 1 the drone follows the PID
-  output, at 0 it follows the search command, and in between it mixes the two.
+
+Three weights, each between 0 and 1, decide how much authority each command
+gets. They are deliberately not the same number.
 
 ```
-visibility  = freshness(detection age) * strength(corner count)
-yaw rate    = visibility * bearing PID + (1 - visibility) * search yaw rate
-forward     = visibility * range PID   + (1 - visibility) * search creep
-forward     = min(forward, braking limit from the collision floor)
+track    = freshness(age, DETECTION_HOLD_S)
+approach = track * strength(corner count) * aim(bearing)
+search   = 1 - freshness(age, REACQUIRE_HOLD_S)
+
+yaw rate = track    * bearing PID + search * search scan
+forward  = approach * range PID   + search * search creep
+forward  = min(forward, braking limit from the collision floor)
 ```
+
+`search` collapses to 0 the instant anything is seen, whatever its quality, so
+a sighting stops the scan dead. `track` gives the bearing PID full authority
+immediately, so the drone turns to centre what it just saw. `approach` is the
+cautious one: it only opens up once the cluster is big enough to trust and
+the target is centred inside `APPROACH_CENTRE_TOL_DEG`, so the drone holds
+station and aims before it flies anywhere.
+
+That ordering matters. Gating the scan on confidence instead of on mere
+sighting means a first glimpse at the frame edge, which is exactly when the
+cluster is smallest, leaves the search still spinning the drone and sweeps the
+target straight back out of frame. `search` decays over the longer
+`REACQUIRE_HOLD_S` window so a momentary loss does not immediately restart the
+scan either.
 
 The range setpoint comes from `MISSION_PHASES` in `src/config.py`, which holds
 it at `CLUMP_RANGE_M` for `CLUMP_HOLD_S` and then lands. The schedule is a list
@@ -34,8 +51,8 @@ of `(duration_s, target_range_m)` pairs rather than a branch, so adding a phase
 is a data change: a second entry at a longer range makes the drone separate
 again, and the same range PID reverses on its own to fly it.
 
-The integral term is scaled by visibility, so a drone that is searching never
-winds up.
+Each PID integrates against its own weight, so a drone that is searching, or
+one that is holding station while it aims, never winds up.
 
 Forward speed is also capped by a braking limit computed from the distance
 left to the collision floor, so the drone can always stop before the cages
@@ -53,7 +70,7 @@ touch.
 | `src/video_recorder.py` | H264 recording and mp4 conversion |
 | `src/annotate.py` | draws detections onto the recording after landing |
 | `src/drone_controller.py` | MAVLink offboard setpoints, takeoff, landing |
-| `src/mission.py` | range schedule, visibility, safe approach speed |
+| `src/mission.py` | range schedule, blend weights, safe approach speed |
 | `src/flight_log.py` | session directory, event log, CSV writers |
 | `src/clump.py` | the flight loop |
 | `src/vision_test.py` | detection on the bench or on a recording, no flying |
@@ -134,14 +151,14 @@ prints a line a second while it runs, and ends with a summary:
 
 The `dropouts` line is the one to watch. It counts runs of consecutive missed
 frames and reports the longest. If that longest run reaches
-`DETECTION_HOLD_S`, visibility fell to zero and the drone would have gone all
-the way back to searching, and the summary says so outright. Short runs are
-harmless: visibility decays smoothly, so a frame or two missed only softens
+`REACQUIRE_HOLD_S`, the scan restarted and the drone spun away from a target
+it had already found, and the summary says so outright. Short runs are
+harmless: the weights decay smoothly, so a frame or two missed only softens
 the tracking, it does not flip any switch.
 
 The remaining verdict lines flag detection under 50 percent, and clusters
-whose median size is under `TRUSTED_CORNER_COUNT`, which caps visibility below
-1.0 and leaves the drone permanently part way into its search behaviour.
+whose median size is under `TRUSTED_CORNER_COUNT`, which caps `approach_w` and
+leaves the drone closing more slowly than it needs to.
 
 The same script replays a photo or a video instead of the live camera, so
 detection can be checked on a laptop against footage from an earlier run.
@@ -222,7 +239,7 @@ changes, PX4 status text, target acquired and lost transitions, mission phase
 changes, and a one line flight summary every second:
 
 ```
-   12.40 [flight] t0009.2 see 0.85 range 3.42/2.00 m bearing +2.4 deg corners 4 fwd +0.28 m/s yaw +2.6 deg/s alt 3.01 m hdg 214 deg cam 9.8 fps
+   12.40 [flight] t0009.2 trk 1.00 app 0.72 srch 0.00 range 3.42/0.20 m bearing +2.4 deg corners 4 fwd +0.28 m/s yaw +2.6 deg/s alt 3.01 m hdg 214 deg cam 9.8 fps
 ```
 
 The last two lines of every run are the session path and a ready to paste
@@ -245,7 +262,9 @@ One row per control tick. This is the controller's own view of the world.
 |---|---|
 | `t_mono`, `elapsed` | monotonic clock, and seconds since takeoff |
 | `schedule_t` | seconds since the first detection, what the schedule reads |
-| `visibility` | the blend weight, 0 searching to 1 fully tracking |
+| `track_w` | yaw authority, 1 while a detection is fresh |
+| `approach_w` | forward authority, gated by corner count and centring |
+| `search_w` | scan authority, 0 the moment anything is seen |
 | `target_range_m` | what the schedule is asking for right now |
 | `range_m`, `range_error_m` | measured range, and measured minus target |
 | `bearing_deg` | horizontal angle to the centroid, positive to the right |
@@ -256,8 +275,10 @@ One row per control tick. This is the controller's own view of the world.
 | `altitude_agl`, `heading_deg` | where the drone was |
 | `camera_fps` | detection loop rate at that moment |
 
-`forward_cmd` differing from `forward_track` means the drone was part way into
-its search behaviour, or the braking limit was binding.
+`forward_cmd` differing from `forward_track` means the braking limit was
+binding, or `approach_w` was holding the drone back until it centred. A row
+with `track_w` at 1 and `approach_w` at 0 is the drone stopped and aiming,
+which is the intended behaviour on first sighting.
 
 ### vision.csv
 
@@ -379,9 +400,14 @@ enough to measure the whole approach, the floor is advisory and the kill
 switch is the real protection.
 
 **Control.** `YAW_GAINS` and `RANGE_GAINS` are `(kp, ki, kd)`. Raise
-`DETECTION_HOLD_S` to coast further through dropped frames, lower it to fall
-back to searching sooner. `TRUSTED_CORNER_COUNT` is the cluster size at which
-the drone commits fully to tracking.
+`DETECTION_HOLD_S` to coast further through dropped frames, lower it to give
+up on a stale bearing sooner. `REACQUIRE_HOLD_S` is the separate, longer
+window before the scan restarts, and should stay above `DETECTION_HOLD_S` so a
+brief loss does not put the drone straight back into a spin.
+`TRUSTED_CORNER_COUNT` is the cluster size at which the drone commits fully to
+closing, and `APPROACH_CENTRE_TOL_DEG` is how far off centre the target can be
+before forward speed is throttled to zero, which is what makes the drone stop
+and aim rather than curve in.
 
 **Holding the track.** Four settings fight frame to frame dropouts, in the
 order they act:
@@ -444,4 +470,4 @@ before clustering is linear in pixels, and the detector only ever labels the
 frame once, filters blobs with vectorized numpy, and builds one pairwise
 distance matrix. Watch `cv_ms` and `fps` in `vision.csv`: if `fps` falls far
 below `FRAME_RATE` the control loop is acting on stale detections and
-`DETECTION_HOLD_S` will start cutting visibility.
+`DETECTION_HOLD_S` will start cutting the tracking weight.

@@ -120,12 +120,13 @@ class DetectionSummary:
         if self.corners and _median(self.corners) < config.TRUSTED_CORNER_COUNT:
             lines.append(f"the median cluster holds fewer than "
                          f"{config.TRUSTED_CORNER_COUNT} corners, so "
-                         f"visibility will stay below 1.0 in flight")
-        if self.longest_gap_s() >= config.DETECTION_HOLD_S:
+                         f"the drone will close on it slowly in flight")
+        if self.longest_gap_s() >= config.REACQUIRE_HOLD_S:
             lines.append(f"a {self.longest_gap_s():.2f} s dropout reaches "
-                         f"DETECTION_HOLD_S ({config.DETECTION_HOLD_S:.2f} s), "
-                         f"so the drone would have fallen all the way back "
-                         f"to searching")
+                         f"REACQUIRE_HOLD_S "
+                         f"({config.REACQUIRE_HOLD_S:.2f} s), so the scan "
+                         f"would have restarted and spun the drone away from "
+                         f"a target it had already found")
         return lines or ["detection looks healthy"]
 
 
