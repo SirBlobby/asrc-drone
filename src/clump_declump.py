@@ -8,7 +8,8 @@ from drone_controller import DroneController
 from flight_log import FlightLog
 from pid import PID
 
-BEHAVIOUR_FIELDS = ["t_mono", "elapsed", "visibility", "target_range_m",
+BEHAVIOUR_FIELDS = ["t_mono", "elapsed", "schedule_t", "visibility",
+                    "target_range_m",
                     "range_m", "range_error_m", "bearing_deg", "corner_count",
                     "detection_age_s", "forward_track", "forward_cmd",
                     "speed_limit", "yaw_track", "yaw_cmd", "altitude_agl",
@@ -23,25 +24,29 @@ class ClumpController:
         self.range_pid = PID(config.RANGE_GAINS,
                              config.FORWARD_SPEED_LIMIT_M_S)
         self.announced_range = None
+        self.engaged_at = None
+        self.schedule_t = 0.0
 
-    def step(self, detection, elapsed, now, dt):
-        target_range_m = self.schedule.target_range(elapsed)
-        self._announce_phase(target_range_m, elapsed)
-
+    def step(self, detection, now, dt):
         seen = mission.visibility(detection, now)
+        self._engage(seen, now)
+
+        target_range_m = self.schedule.target_range(self.schedule_t)
+        self._announce_phase(target_range_m, self.schedule_t)
         range_error_m = detection.range_m - target_range_m
 
         yaw_track = self.bearing_pid.update(detection.bearing_deg, dt, seen)
         forward_track = self.range_pid.update(range_error_m, dt, seen)
 
         yaw_cmd = mission.blend(seen, yaw_track,
-                                mission.search_yaw_rate(detection))
+                                mission.search_yaw_rate(detection, now))
         forward_cmd = mission.blend(seen, forward_track,
                                     config.SEARCH_FORWARD_SPEED_M_S)
         speed_limit = mission.approach_speed_limit(detection.range_m)
         forward_cmd = min(forward_cmd, speed_limit)
 
         return {
+            "schedule_t": round(self.schedule_t, 2),
             "visibility": round(seen, 3),
             "target_range_m": target_range_m,
             "range_m": round(detection.range_m, 2),
@@ -56,6 +61,16 @@ class ClumpController:
             "yaw_cmd": round(yaw_cmd, 2),
         }
 
+    def _engage(self, seen, now):
+        if self.engaged_at is None and seen > 0.0:
+            self.engaged_at = now
+            self.log.event("mission", "target acquired, schedule starts now")
+        self.schedule_t = (0.0 if self.engaged_at is None
+                           else now - self.engaged_at)
+
+    def finished(self):
+        return self.schedule.finished(self.schedule_t)
+
     def _announce_phase(self, target_range_m, elapsed):
         if target_range_m == self.announced_range:
             return
@@ -65,7 +80,8 @@ class ClumpController:
 
 
 def status_line(command, drone, camera):
-    return (f"see {command['visibility']:.2f} "
+    return (f"t{command['schedule_t']:05.1f} "
+            f"see {command['visibility']:.2f} "
             f"range {command['range_m']:.2f}/{command['target_range_m']:.2f} m "
             f"bearing {command['bearing_deg']:+.1f} deg "
             f"corners {command['corner_count']} "
@@ -92,14 +108,15 @@ def fly(log, camera, drone):
     while True:
         now = time.monotonic()
         elapsed = now - started
-        if controller.schedule.finished(elapsed):
+        if controller.finished():
             log.event("mission", "schedule complete")
             break
         if elapsed > config.MISSION_TIMEOUT_S:
-            log.event("mission", "timeout reached")
+            log.event("mission", "timeout reached, target never held long "
+                                 "enough to finish the schedule")
             break
 
-        command = controller.step(camera.latest(), elapsed, now, interval)
+        command = controller.step(camera.latest(), now, interval)
         drone.move_body(command["forward_cmd"], 0.0, command["yaw_cmd"])
 
         rows.write(t_mono=round(now, 4), elapsed=round(elapsed, 2),

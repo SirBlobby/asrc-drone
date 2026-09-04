@@ -42,6 +42,9 @@ def blend(weight, tracking_value, searching_value):
     return weight * tracking_value + (1.0 - weight) * searching_value
 
 
-def search_yaw_rate(detection):
-    return math.copysign(config.SEARCH_YAW_RATE_DPS,
+def search_yaw_rate(detection, now):
+    turn_s = config.SEARCH_STEP_DEG / config.SEARCH_YAW_RATE_DPS
+    period = turn_s + config.SEARCH_DWELL_S
+    turning = float(now % period < turn_s)
+    return math.copysign(config.SEARCH_YAW_RATE_DPS * turning,
                          detection.bearing_deg or 1.0)

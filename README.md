@@ -163,9 +163,15 @@ python3 src/clump_declump.py
 
 Keep the transmitter kill switch in hand for every powered run.
 
-By default the drone climbs to 3 m, spends 45 s holding a 2 m range, then 20 s
-holding a 4 m range, and lands. The whole run is capped at 150 s regardless of
-the schedule.
+By default the drone climbs to 3 m, scans until it finds another drone, then
+spends 45 s holding a 2 m range and 20 s holding a 4 m range before landing.
+The whole run is capped at `MISSION_TIMEOUT_S`, 150 s, whether or not the
+schedule ever completes.
+
+The schedule clock starts on the first detection, not at takeoff. Searching is
+untimed, so a drone that takes a minute to find its partner still gets its
+full clump phase. `behaviour.csv` logs both clocks: `elapsed` since takeoff and
+`schedule_t` since acquisition.
 
 ## Session logs
 
@@ -196,7 +202,7 @@ changes, PX4 status text, target acquired and lost transitions, mission phase
 changes, and a one line flight summary every second:
 
 ```
-   12.40 [flight] see 0.85 range 3.42/2.00 m bearing +2.4 deg corners 4 fwd +0.28 m/s yaw +2.6 deg/s alt 3.01 m hdg 214 deg cam 9.8 fps
+   12.40 [flight] t0009.2 see 0.85 range 3.42/2.00 m bearing +2.4 deg corners 4 fwd +0.28 m/s yaw +2.6 deg/s alt 3.01 m hdg 214 deg cam 9.8 fps
 ```
 
 The last two lines of every run are the session path and a ready to paste
@@ -217,7 +223,8 @@ One row per control tick. This is the controller's own view of the world.
 
 | column | meaning |
 |---|---|
-| `t_mono`, `elapsed` | monotonic clock, and seconds since the mission began |
+| `t_mono`, `elapsed` | monotonic clock, and seconds since takeoff |
+| `schedule_t` | seconds since the first detection, what the schedule reads |
 | `visibility` | the blend weight, 0 searching to 1 fully tracking |
 | `target_range_m` | what the schedule is asking for right now |
 | `range_m`, `range_error_m` | measured range, and measured minus target |
@@ -349,15 +356,30 @@ order they act:
   dropped, for that many frames after a good detection. `vision.csv` marks
   those frames with `relaxed` at 1, and the run summary counts them.
 
-**Search.** With nothing in view the drone turns at `SEARCH_YAW_RATE_DPS` and
-creeps forward at `SEARCH_FORWARD_SPEED_M_S`. It turns toward the side the
-target was last seen on, so a target that leaves the right edge of the frame
-is searched for to the right. The camera only sees 24 degrees, so a faster
-turn trades coverage for the risk of sweeping a target through the frame
-between detections.
+**Search.** With nothing in view the drone scans in steps rather than turning
+continuously. It yaws `SEARCH_STEP_DEG` at `SEARCH_YAW_RATE_DPS`, then holds
+still for `SEARCH_DWELL_S` before the next step. At the defaults that is a 20
+degree step taking half a second, a one second pause, and 27 seconds for a
+full revolution.
+
+The pause is the point. The camera sees 24 degrees, so a 20 degree step
+overlaps slightly and nothing falls between steps, and each dwell gives the
+detector about ten motion free frames to work with. Turning continuously
+smears the markers across the frame and is why a spinning drone detects worse
+than a stationary one.
+
+It steps toward the side the target was last seen on, so a target that leaves
+the right edge of the frame is searched for to the right.
+
+`SEARCH_FORWARD_SPEED_M_S` defaults to 0, so the drone holds station while it
+scans. Setting it above 0 makes the drone creep forward while searching, which
+sounds helpful but means two drones that cannot see each other drive apart in
+whatever direction they happen to be facing.
 
 **Mission and safety.** `MISSION_PHASES` is a tuple of
 `(duration_s, target_range_m)` pairs and can hold as many phases as you want.
+Those durations are measured from the first detection, so lengthening the
+search does not eat into the clump phase.
 `MINIMUM_RANGE_M` is derived, not set directly: it is two cage radii plus
 `SAFETY_GAP_M`, which is 1.21 m at the defaults. `CLUMP_RANGE_M` must stay
 comfortably above it or the drone will sit on the braking limit instead of
