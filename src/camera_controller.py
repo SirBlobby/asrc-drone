@@ -2,7 +2,8 @@ import threading
 import time
 
 import config
-from detection import Detection, FrameGeometry, VISION_FIELDS, vision_row
+from detection import (CORNER_FIELDS, Detection, FrameGeometry,
+                       VISION_FIELDS, corner_rows, vision_row)
 from marker_detector import MarkerDetector
 from video_recorder import VideoRecorder
 
@@ -25,11 +26,14 @@ class CameraController:
         self.fps = 0.0
         self.had_target = False
         self.csv = None
+        self.corner_csv = None
 
     def start(self):
         from picamera2 import Picamera2
 
         self.csv = self.log.csv("vision", VISION_FIELDS)
+        if config.LOG_CORNERS:
+            self.corner_csv = self.log.csv("corners", CORNER_FIELDS)
         frame_duration = int(1e6 / config.FRAME_RATE)
         streams = {"main": {"size": config.FRAME_SIZE, "format": "RGB888"}}
         if config.RECORD_VIDEO:
@@ -72,6 +76,8 @@ class CameraController:
             self.camera = None
         if self.csv:
             self.csv.flush()
+        if self.corner_csv:
+            self.corner_csv.flush()
         self.log.event("camera", f"{self.detected_frames} of {self.frames} "
                                  f"frames held a target")
 
@@ -107,6 +113,13 @@ class CameraController:
                 self.frames, cluster, self.latest(),
                 self.detector.mask_pixels, now, cv_seconds, self.fps,
                 metadata))
+            self._write_corners()
+
+    def _write_corners(self):
+        if self.corner_csv is None:
+            return
+        for row in corner_rows(self.frames, self.detector.corners):
+            self.corner_csv.write(**row)
 
     def _grab(self):
         request = self.camera.capture_request()

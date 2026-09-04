@@ -40,3 +40,8 @@ def approach_speed_limit(range_m):
 
 def blend(weight, tracking_value, searching_value):
     return weight * tracking_value + (1.0 - weight) * searching_value
+
+
+def search_yaw_rate(detection):
+    return math.copysign(config.SEARCH_YAW_RATE_DPS,
+                         detection.bearing_deg or 1.0)

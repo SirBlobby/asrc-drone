@@ -1,9 +1,22 @@
+import math
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 import config
+
+FAR_AWAY = 10 ** 9
+
+
+@dataclass
+class Corner:
+    x: float
+    y: float
+    area: int
+    radius: float
+    box: tuple
+    in_cluster: bool = False
 
 
 @dataclass
@@ -14,6 +27,7 @@ class Cluster:
     corner_count: int
     corners_seen: int
     box: tuple
+    relaxed: bool = False
 
 
 class MarkerDetector:
@@ -21,63 +35,155 @@ class MarkerDetector:
         self.kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE,
             (config.OPEN_KERNEL_PX, config.OPEN_KERNEL_PX))
-        self.mask = None
         self.mask_pixels = 0
+        self.corners = []
+        self.last = None
+        self.frames_since_seen = FAR_AWAY
 
     def find(self, frame):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        self.mask = self._marker_mask(hsv)
-        points, areas, radii, boxes = self._corners(self.mask)
-        return self._densest_cluster(points, areas, radii, boxes)
+        blobs, centroids, seeded = self._scan(hsv)
 
-    def _marker_mask(self, hsv):
-        low_saturation = config.MARKER_SATURATION_MIN
-        low_value = config.MARKER_VALUE_MIN
-        upper_red = cv2.inRange(
+        cluster = self._search(blobs, centroids, seeded)
+        if cluster is None and self.frames_since_seen <= config.FALLBACK_FRAMES:
+            loose = np.zeros(len(seeded), dtype=bool)
+            loose[1:] = True
+            cluster = self._search(blobs, centroids, loose)
+            if cluster is not None:
+                cluster.relaxed = True
+
+        self._remember(cluster)
+        return cluster
+
+    def _scan(self, hsv):
+        loose = self._window(hsv, config.MARKER_SATURATION_MIN,
+                             config.MARKER_VALUE_MIN)
+        loose = cv2.morphologyEx(loose, cv2.MORPH_OPEN, self.kernel)
+        count, labels, blobs, centroids = cv2.connectedComponentsWithStats(
+            loose, 8)
+
+        seeded = np.zeros(count, dtype=bool)
+        if count > 1:
+            core = self._window(hsv, config.MARKER_CORE_SATURATION,
+                                config.MARKER_CORE_VALUE)
+            seeded[labels[core > 0]] = True
+            seeded[0] = False
+
+        self.mask_pixels = int(blobs[seeded, cv2.CC_STAT_AREA].sum())
+        return blobs, centroids, seeded
+
+    def _window(self, hsv, saturation, value):
+        above = cv2.inRange(
             hsv,
-            np.array((config.MARKER_HUE_WRAP_LOW, low_saturation, low_value),
+            np.array((config.MARKER_HUE_WRAP_LOW, saturation, value),
                      dtype=np.uint8),
             np.array((179, 255, 255), dtype=np.uint8))
-        lower_red = cv2.inRange(
+        below = cv2.inRange(
             hsv,
-            np.array((0, low_saturation, low_value), dtype=np.uint8),
+            np.array((0, saturation, value), dtype=np.uint8),
             np.array((config.MARKER_HUE_WRAP_HIGH, 255, 255), dtype=np.uint8))
-        mask = cv2.bitwise_or(upper_red, lower_red)
-        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
+        return cv2.bitwise_or(above, below)
 
-    def _corners(self, mask):
-        count, _, blobs, centroids = cv2.connectedComponentsWithStats(mask, 8)
-        blobs = blobs[1:]
-        centroids = centroids[1:]
+    def _search(self, blobs, centroids, chosen):
+        self.corners = self._corners(blobs, centroids, chosen)
+        if len(self.corners) < config.MIN_CLUSTER_CORNERS:
+            return None
 
-        areas = blobs[:, cv2.CC_STAT_AREA].astype(np.float32)
-        self.mask_pixels = int(areas.sum())
-        widths = np.maximum(blobs[:, cv2.CC_STAT_WIDTH], 1)
-        heights = np.maximum(blobs[:, cv2.CC_STAT_HEIGHT], 1)
+        points = np.array([(c.x, c.y) for c in self.corners], dtype=np.float32)
+        radii = np.array([c.radius for c in self.corners], dtype=np.float32)
+        distances = _pairwise(points)
+        groups = _groups(_adjacency(radii, distances))
+
+        members = self._best_group(groups)
+        if members is None:
+            return None
+        for index in members:
+            self.corners[index].in_cluster = True
+        return self._cluster_from(members, distances)
+
+    def _corners(self, blobs, centroids, chosen):
+        index = np.nonzero(chosen)[0]
+        if index.size == 0:
+            return []
+
+        areas = blobs[index, cv2.CC_STAT_AREA].astype(np.float32)
+        widths = np.maximum(blobs[index, cv2.CC_STAT_WIDTH], 1)
+        heights = np.maximum(blobs[index, cv2.CC_STAT_HEIGHT], 1)
         fill = areas / (widths * heights)
         aspect = np.maximum(widths, heights) / np.minimum(widths, heights)
 
+        testable = areas >= config.SHAPE_TEST_MIN_AREA_PX
+        shaped = ~testable | ((fill >= config.MIN_CORNER_FILL) &
+                              (aspect <= config.MAX_CORNER_ASPECT))
         keep = ((areas >= config.MIN_CORNER_AREA_PX) &
-                (areas <= config.MAX_CORNER_AREA_PX) &
-                (fill >= config.MIN_CORNER_FILL) &
-                (aspect <= config.MAX_CORNER_ASPECT))
-        kept = np.nonzero(keep)[0]
-        kept = kept[np.argsort(-areas[kept])][:config.MAX_CORNERS]
+                (areas <= config.MAX_CORNER_AREA_PX) & shaped)
 
-        points = centroids[kept].astype(np.float32)
-        areas = areas[kept]
-        radii = np.sqrt(areas / np.pi).astype(np.float32)
-        boxes = blobs[kept][:, :4]
-        return points, areas, radii, boxes
+        kept = index[keep]
+        kept = kept[np.argsort(-blobs[kept, cv2.CC_STAT_AREA])]
+        kept = kept[:config.MAX_CORNERS]
+        return _drop_undersized([
+            Corner(x=float(centroids[i][0]), y=float(centroids[i][1]),
+                   area=int(blobs[i, cv2.CC_STAT_AREA]),
+                   radius=math.sqrt(blobs[i, cv2.CC_STAT_AREA] / math.pi),
+                   box=tuple(int(v) for v in blobs[i, :4]))
+            for i in kept])
 
-    def _densest_cluster(self, points, areas, radii, boxes):
-        if len(points) < config.MIN_CLUSTER_CORNERS:
-            return None
-        distances = _pairwise(points)
-        adjacency = _adjacency(radii, distances)
-        members = _best_group(_groups(adjacency), areas)
-        return _cluster_from(members, points, areas, distances, boxes,
-                             len(points))
+    def _best_group(self, groups):
+        usable = [g for g in groups if len(g) >= config.MIN_CLUSTER_CORNERS]
+        return max(usable, key=self._rank, default=None)
+
+    def _rank(self, members):
+        area = sum(self.corners[i].area for i in members)
+        return area * self._continuity(members)
+
+    def _continuity(self, members):
+        if (self.last is None or
+                self.frames_since_seen > config.CONTINUITY_HOLD_FRAMES):
+            return 1.0
+        last_x, last_y, last_span = self.last
+        x = sum(self.corners[i].x for i in members) / len(members)
+        y = sum(self.corners[i].y for i in members) / len(members)
+        reach = config.CONTINUITY_REACH * max(last_span, 20.0)
+        near = math.hypot(x - last_x, y - last_y) <= reach
+        return config.CONTINUITY_BONUS if near else 1.0
+
+    def _cluster_from(self, members, distances):
+        chosen = [self.corners[i] for i in members]
+        weights = sum(c.area for c in chosen)
+        index = np.array(members)
+        return Cluster(
+            x=sum(c.x * c.area for c in chosen) / weights,
+            y=sum(c.y * c.area for c in chosen) / weights,
+            span_px=float(distances[np.ix_(index, index)].max()),
+            corner_count=len(chosen),
+            corners_seen=len(self.corners),
+            box=_bounding_box(chosen))
+
+    def _remember(self, cluster):
+        if cluster is None:
+            self.frames_since_seen += 1
+            if self.frames_since_seen > config.CONTINUITY_HOLD_FRAMES:
+                self.last = None
+            return
+        self.last = (cluster.x, cluster.y, cluster.span_px)
+        self.frames_since_seen = 0
+
+
+def _drop_undersized(corners):
+    if config.MIN_AREA_FRACTION <= 0 or len(corners) < 3:
+        return corners
+    areas = sorted(c.area for c in corners)
+    floor = areas[len(areas) // 2] * config.MIN_AREA_FRACTION
+    kept = [c for c in corners if c.area >= floor]
+    return kept if len(kept) >= config.MIN_CLUSTER_CORNERS else corners
+
+
+def _bounding_box(corners):
+    left = min(c.box[0] for c in corners)
+    top = min(c.box[1] for c in corners)
+    right = max(c.box[0] + c.box[2] for c in corners)
+    bottom = max(c.box[1] + c.box[3] for c in corners)
+    return (left, top, right - left, bottom - top)
 
 
 def _pairwise(points):
@@ -115,25 +221,3 @@ def _groups(adjacency):
             stack.extend(neighbours)
         groups.append(members)
     return groups
-
-
-def _best_group(groups, areas):
-    usable = [g for g in groups if len(g) >= config.MIN_CLUSTER_CORNERS]
-    return max(usable, key=lambda g: float(areas[g].sum()), default=None)
-
-
-def _cluster_from(members, points, areas, distances, boxes, corners_seen):
-    if members is None:
-        return None
-    index = np.array(members)
-    weights = areas[index]
-    centre = (points[index] * weights[:, None]).sum(axis=0) / weights.sum()
-    left = int(boxes[index][:, 0].min())
-    top = int(boxes[index][:, 1].min())
-    right = int((boxes[index][:, 0] + boxes[index][:, 2]).max())
-    bottom = int((boxes[index][:, 1] + boxes[index][:, 3]).max())
-    return Cluster(
-        x=float(centre[0]), y=float(centre[1]),
-        span_px=float(distances[np.ix_(index, index)].max()),
-        corner_count=len(members), corners_seen=corners_seen,
-        box=(left, top, right - left, bottom - top))

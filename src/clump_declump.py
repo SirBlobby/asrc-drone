@@ -34,7 +34,8 @@ class ClumpController:
         yaw_track = self.bearing_pid.update(detection.bearing_deg, dt, seen)
         forward_track = self.range_pid.update(range_error_m, dt, seen)
 
-        yaw_cmd = mission.blend(seen, yaw_track, config.SEARCH_YAW_RATE_DPS)
+        yaw_cmd = mission.blend(seen, yaw_track,
+                                mission.search_yaw_rate(detection))
         forward_cmd = mission.blend(seen, forward_track,
                                     config.SEARCH_FORWARD_SPEED_M_S)
         speed_limit = mission.approach_speed_limit(detection.range_m)

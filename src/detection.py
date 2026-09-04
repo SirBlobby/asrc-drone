@@ -9,7 +9,9 @@ VISION_FIELDS = ["frame", "t_mono", "cv_ms", "fps", "seen", "centre_x",
                  "centre_y", "bearing_deg", "elevation_deg", "span_px",
                  "range_m", "corner_count", "corners_seen", "mask_px",
                  "box_x", "box_y", "box_w", "box_h",
-                 "exposure_us", "gain", "lux"]
+                 "relaxed", "exposure_us", "gain", "lux"]
+
+CORNER_FIELDS = ["frame", "x", "y", "area", "radius", "in_cluster"]
 
 
 @dataclass
@@ -83,7 +85,16 @@ def vision_row(frame_index, cluster, detection, mask_pixels, t_mono,
         "box_y": cluster.box[1] if seen else "",
         "box_w": cluster.box[2] if seen else "",
         "box_h": cluster.box[3] if seen else "",
+        "relaxed": int(cluster.relaxed) if seen else 0,
         "exposure_us": metadata.get("ExposureTime", ""),
         "gain": round(metadata.get("AnalogueGain", 0.0), 2),
         "lux": round(metadata.get("Lux", 0.0), 1),
     }
+
+
+def corner_rows(frame_index, corners):
+    return [{"frame": frame_index, "x": round(corner.x, 1),
+             "y": round(corner.y, 1), "area": corner.area,
+             "radius": round(corner.radius, 2),
+             "in_cluster": int(corner.in_cluster)}
+            for corner in corners]

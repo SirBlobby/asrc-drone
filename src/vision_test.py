@@ -7,7 +7,8 @@ import cv2
 
 import annotate
 import config
-from detection import Detection, FrameGeometry, VISION_FIELDS, vision_row
+from detection import (CORNER_FIELDS, Detection, FrameGeometry,
+                       VISION_FIELDS, corner_rows, vision_row)
 from flight_log import FlightLog
 from marker_detector import MarkerDetector
 
@@ -23,6 +24,9 @@ class DetectionSummary:
         self.corners = []
         self.mask_pixels = []
         self.cv_milliseconds = []
+        self.relaxed = 0
+        self.gaps = []
+        self.open_gap = 0
 
     @classmethod
     def from_csv(cls, path):
@@ -38,20 +42,38 @@ class DetectionSummary:
         self.frames += 1
         self.mask_pixels.append(float(row["mask_px"] or 0))
         self.cv_milliseconds.append(float(row["cv_ms"] or 0))
-        if row["seen"] != "1":
+        seen = row["seen"] == "1"
+        self._track_gap(seen)
+        if not seen:
             return
         self.hits += 1
+        self.relaxed += int(row.get("relaxed") == "1")
         self.spans.append(float(row["span_px"]))
         self.ranges.append(float(row["range_m"]))
         self.corners.append(float(row["corner_count"]))
+
+    def _track_gap(self, seen):
+        if not seen:
+            self.open_gap += 1
+            return
+        if self.open_gap:
+            self.gaps.append(self.open_gap)
+        self.open_gap = 0
+
+    def _close_gap(self):
+        if self.open_gap:
+            self.gaps.append(self.open_gap)
+            self.open_gap = 0
 
     def add(self, cluster, detection, mask_pixels, cv_seconds):
         self.frames += 1
         self.mask_pixels.append(mask_pixels)
         self.cv_milliseconds.append(cv_seconds * 1000.0)
+        self._track_gap(cluster is not None)
         if cluster is None:
             return
         self.hits += 1
+        self.relaxed += int(cluster.relaxed)
         self.spans.append(cluster.span_px)
         self.ranges.append(detection.range_m)
         self.corners.append(cluster.corner_count)
@@ -60,6 +82,7 @@ class DetectionSummary:
         if self.frames == 0:
             log.event("summary", "no frames processed")
             return
+        self._close_gap()
         rate = 100.0 * self.hits / self.frames
         log.event("summary", f"{self.hits} of {self.frames} frames detected "
                              f"a target ({rate:.1f} percent)")
@@ -69,7 +92,40 @@ class DetectionSummary:
                                    ("range", self.ranges, "m"),
                                    ("corners", self.corners, "")):
             log.event("summary", f"{name:8} {_spread(values, unit)}")
-        log.event("summary", _verdict(rate, self.corners))
+        log.event("summary", f"relaxed  {self.relaxed} frames held the target "
+                             f"only through the fallback pass")
+        log.event("summary", f"dropouts {self._dropouts()}")
+        for line in self._verdicts(rate):
+            log.event("summary", line)
+
+    def longest_gap_s(self):
+        return max(self.gaps, default=0) / float(config.FRAME_RATE)
+
+    def _dropouts(self):
+        if not self.gaps:
+            return "none, the target was held on every frame"
+        longest = max(self.gaps)
+        return (f"{len(self.gaps)} {_plural('run', len(self.gaps))} of missed "
+                f"frames, longest {longest} "
+                f"{_plural('frame', longest)} "
+                f"({longest / float(config.FRAME_RATE):.2f} s), "
+                f"median {_median(self.gaps)}")
+
+    def _verdicts(self, rate):
+        lines = []
+        if rate < 50.0:
+            lines.append("detection is unreliable, widen the colour window "
+                         "or check lighting before flying")
+        if self.corners and _median(self.corners) < config.TRUSTED_CORNER_COUNT:
+            lines.append(f"the median cluster holds fewer than "
+                         f"{config.TRUSTED_CORNER_COUNT} corners, so "
+                         f"visibility will stay below 1.0 in flight")
+        if self.longest_gap_s() >= config.DETECTION_HOLD_S:
+            lines.append(f"a {self.longest_gap_s():.2f} s dropout reaches "
+                         f"DETECTION_HOLD_S ({config.DETECTION_HOLD_S:.2f} s), "
+                         f"so the drone would have fallen all the way back "
+                         f"to searching")
+        return lines or ["detection looks healthy"]
 
 
 def _spread(values, unit):
@@ -81,15 +137,12 @@ def _spread(values, unit):
             f"max {ordered[-1]:.1f}{unit}")
 
 
-def _verdict(rate, corners):
-    if rate < 50.0:
-        return ("detection is unreliable, widen the colour window or check "
-                "lighting before flying")
-    if corners and sorted(corners)[len(corners) // 2] < config.TRUSTED_CORNER_COUNT:
-        return (f"detected, but the median cluster holds fewer than "
-                f"{config.TRUSTED_CORNER_COUNT} corners, so visibility will "
-                f"stay below 1.0 in flight")
-    return "detection looks healthy"
+def _median(values):
+    return sorted(values)[len(values) // 2]
+
+
+def _plural(word, count):
+    return word if count == 1 else f"{word}s"
 
 
 class Snapshots:
@@ -100,13 +153,14 @@ class Snapshots:
         if every > 0:
             os.makedirs(self.directory, exist_ok=True)
 
-    def maybe_save(self, frame, cluster, detection, frame_index, mask_pixels):
+    def maybe_save(self, frame, cluster, detection, frame_index, mask_pixels,
+                   corners=()):
         wanted = frame_index == 1 or frame_index % self.every == 0
         if (self.every <= 0 or not wanted
                 or self.saved >= config.SNAPSHOT_LIMIT):
             return
         image = annotate.draw_cluster(frame.copy(), cluster, detection,
-                                      frame_index, mask_pixels)
+                                      frame_index, mask_pixels, corners)
         cv2.imwrite(os.path.join(self.directory, f"{frame_index:05d}.jpg"),
                     image, [cv2.IMWRITE_JPEG_QUALITY, 85])
         self.saved += 1
@@ -118,6 +172,7 @@ def run_file(log, source, snapshot_every):
     summary = DetectionSummary()
     snapshots = Snapshots(log, snapshot_every)
     rows = log.csv("vision", VISION_FIELDS)
+    corner_rows_csv = log.csv("corners", CORNER_FIELDS)
 
     log.event("check", f"replaying {source}")
     for frame_index, frame in enumerate(_frames(source), start=1):
@@ -131,9 +186,11 @@ def run_file(log, source, snapshot_every):
         rows.write(**vision_row(frame_index, cluster, detection,
                                 detector.mask_pixels, started, cv_seconds,
                                 config.FRAME_RATE))
+        for corner in corner_rows(frame_index, detector.corners):
+            corner_rows_csv.write(**corner)
         summary.add(cluster, detection, detector.mask_pixels, cv_seconds)
         snapshots.maybe_save(frame, cluster, detection, frame_index,
-                             detector.mask_pixels)
+                             detector.mask_pixels, detector.corners)
         log.event("frame", annotate.caption(frame_index, cluster, detection) +
                   f"  mask {detector.mask_pixels} px  "
                   f"cv {cv_seconds * 1000.0:.1f} ms")
