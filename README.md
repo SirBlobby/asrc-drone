@@ -1,9 +1,9 @@
 # Horus Drones
 
-Clump and declump behaviour for caged FPV drones. A drone looks for the
-`#c74026` markers on another drone's cage with the Pi camera, closes on it,
-holds formation, then separates again. A drone never knows where the others
-are: everything it does comes from what the camera can see right now.
+Clumping behaviour for caged FPV drones. A drone looks for the `#c74026`
+markers on another drone's cage with the Pi camera, closes on it, and holds
+formation. A drone never knows where the others are: everything it does comes
+from what the camera can see right now.
 
 Target hardware is a Raspberry Pi Zero 2W talking to a PX4 flight controller
 over MAVLink.
@@ -28,10 +28,14 @@ forward     = visibility * range PID   + (1 - visibility) * search creep
 forward     = min(forward, braking limit from the collision floor)
 ```
 
-Clumping and declumping are the same controller. Only the range setpoint
-changes: `MISSION_PHASES` in `src/config.py` holds it at `CLUMP_RANGE_M`, then
-at `DECLUMP_RANGE_M`, and the range PID reverses on its own. The integral term
-is scaled by visibility, so a drone that is searching never winds up.
+The range setpoint comes from `MISSION_PHASES` in `src/config.py`, which holds
+it at `CLUMP_RANGE_M` for `CLUMP_HOLD_S` and then lands. The schedule is a list
+of `(duration_s, target_range_m)` pairs rather than a branch, so adding a phase
+is a data change: a second entry at a longer range makes the drone separate
+again, and the same range PID reverses on its own to fly it.
+
+The integral term is scaled by visibility, so a drone that is searching never
+winds up.
 
 Forward speed is also capped by a braking limit computed from the distance
 left to the collision floor, so the drone can always stop before the cages
@@ -51,7 +55,7 @@ touch.
 | `src/drone_controller.py` | MAVLink offboard setpoints, takeoff, landing |
 | `src/mission.py` | range schedule, visibility, safe approach speed |
 | `src/flight_log.py` | session directory, event log, CSV writers |
-| `src/clump_declump.py` | the flight loop |
+| `src/clump.py` | the flight loop |
 | `src/vision_test.py` | detection on the bench or on a recording, no flying |
 
 ## Install
@@ -158,15 +162,15 @@ at `SNAPSHOT_LIMIT`. Pass 0 to disable.
 
 ```bash
 source .venv/bin/activate
-python3 src/clump_declump.py
+python3 src/clump.py
 ```
 
 Keep the transmitter kill switch in hand for every powered run.
 
-By default the drone climbs to 3 m, scans until it finds another drone, then
-spends 45 s holding a 2 m range and 20 s holding a 4 m range before landing.
-The whole run is capped at `MISSION_TIMEOUT_S`, 150 s, whether or not the
-schedule ever completes.
+By default the drone climbs to 3 m, scans until it finds another drone, closes
+to a 2 m range and holds there for `CLUMP_HOLD_S`, then lands. The whole run is
+capped at `MISSION_TIMEOUT_S`, 150 s, whether or not the schedule ever
+completes.
 
 The schedule clock starts on the first detection, not at takeoff. Searching is
 untimed, so a drone that takes a minute to find its partner still gets its
@@ -379,7 +383,9 @@ whatever direction they happen to be facing.
 **Mission and safety.** `MISSION_PHASES` is a tuple of
 `(duration_s, target_range_m)` pairs and can hold as many phases as you want.
 Those durations are measured from the first detection, so lengthening the
-search does not eat into the clump phase.
+search does not eat into the clump phase. It currently holds one phase, the
+clump. Appending `(20.0, 4.0)` would make the drone separate to 4 m for 20 s
+afterwards, with no code change.
 `MINIMUM_RANGE_M` is derived, not set directly: it is two cage radii plus
 `SAFETY_GAP_M`, which is 1.21 m at the defaults. `CLUMP_RANGE_M` must stay
 comfortably above it or the drone will sit on the braking limit instead of
